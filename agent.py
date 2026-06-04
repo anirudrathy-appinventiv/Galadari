@@ -26,11 +26,8 @@ from livekit.agents import (
     ToolError,
     cli,
     function_tool,
-    inference,
-    TurnHandlingOptions
 )
-from livekit.plugins import silero, deepgram, openai
-from livekit.plugins.turn_detector.multilingual import MultilingualModel
+from livekit.plugins import openai
 
 load_dotenv()
 
@@ -182,30 +179,11 @@ async def drive_thru_agent(ctx: JobContext) -> None:
     userdata = await new_userdata()
     session = AgentSession[Userdata](
         userdata=userdata,
-        stt=deepgram.STT(
-            model="nova-3",
-            language="en",
-            keyterm=[
-                "Big Mac",
-                "McFlurry",
-                "McCrispy",
-                "McNuggets",
-                "Meal",
-                "Sundae",
-                "Oreo",
-                "Jalapeno Ranch",
-            ],
-        ),
-        llm=  openai.realtime.RealtimeModel(
-            voice="alloy",
-            # Disable the model's built-in turn detection to use
-            # the LiveKit turn detector instead
-            turn_detection=None,
-            input_audio_transcription=None,  # use Deepgram STT instead
-        ),
-        # tts=inference.TTS("cartesia/sonic-3", voice="f786b574-daa5-4673-aa0c-cbe3e8534c02"),
-        turn_handling=TurnHandlingOptions(turn_detection=MultilingualModel()),
-        vad = silero.VAD.load(),
+        # Pure speech-to-speech: the Realtime model runs its OWN turn detection
+        # (server-side VAD) and transcription. We intentionally do NOT attach an
+        # external STT / VAD / turn detector — those were desyncing the model's
+        # conversation state and causing it to cut off and speak gibberish.
+        llm=openai.realtime.RealtimeModel(voice="alloy"),
         max_tool_steps=10,
     )
 
