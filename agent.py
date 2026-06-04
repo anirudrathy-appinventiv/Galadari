@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Annotated
 
 from dotenv import load_dotenv
-from menu_rag import SYSTEM_PROMPT, build_menu_catalog, menu_overview, query_menu
+from menu_rag import SYSTEM_PROMPT, build_menu_catalog, menu_overview, query_menu, warm_menu_index
 from order import OrderedDish, OrderState
 from pydantic import Field
 
@@ -20,6 +20,7 @@ from livekit.agents import (
     AgentSession,
     AudioConfig,
     BackgroundAudioPlayer,
+    BuiltinAudioClip,
     FunctionTool,
     JobContext,
     RunContext,
@@ -177,13 +178,16 @@ async def on_session_end(ctx: JobContext) -> None:
 @server.rtc_session(on_session_end=on_session_end)
 async def drive_thru_agent(ctx: JobContext) -> None:
     userdata = await new_userdata()
+    # Warm the menu index now, while the guest is still connecting, so their FIRST
+    # menu question doesn't pay the ~2s cold-start pause we measured in the logs.
+    await warm_menu_index()
     session = AgentSession[Userdata](
         userdata=userdata,
         # Pure speech-to-speech: the Realtime model runs its OWN turn detection
         # (server-side VAD) and transcription. We intentionally do NOT attach an
         # external STT / VAD / turn detector — those were desyncing the model's
         # conversation state and causing it to cut off and speak gibberish.
-        llm=openai.realtime.RealtimeModel(voice="alloy"),
+        llm=openai.realtime.RealtimeModel(voice="marin"),
         max_tool_steps=10,
     )
 
@@ -192,6 +196,13 @@ async def drive_thru_agent(ctx: JobContext) -> None:
             str(os.path.join(os.path.dirname(os.path.abspath(__file__)), "bg_noise.mp3")),
             volume=1.0,
         ),
+        # Soft till-tapping that plays AUTOMATICALLY whenever the agent is busy
+        # (e.g. during query_menu tool calls), so the guest never hears dead air.
+        # It stops on its own the moment the agent starts speaking.
+        thinking_sound=[
+            AudioConfig(BuiltinAudioClip.KEYBOARD_TYPING, volume=0.35, probability=0.6),
+            AudioConfig(BuiltinAudioClip.KEYBOARD_TYPING2, volume=0.35, probability=0.4),
+        ],
     )
 
     # Push the cart as markdown to the playground's cart view
