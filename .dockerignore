@@ -46,3 +46,10 @@ test/
 tests/
 eval/
 evals/
+test_agent.py
+
+# Web front end — not part of the agent container (saves ~386MB of node_modules/.next)
+web/
+
+# Legacy McDonald's FakeDB — dead code, not imported by the agent
+database.py
