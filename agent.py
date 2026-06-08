@@ -28,6 +28,8 @@ from livekit.agents import (
     cli,
     function_tool,
 )
+from livekit import rtc
+from livekit.agents import MetricsCollectedEvent, metrics
 from livekit.plugins import openai
 
 load_dotenv()
@@ -91,7 +93,12 @@ class DriveThruAgent(Agent):
                 quantity=max(1, quantity),
             )
             await ctx.userdata.order.add(item)
-            return f"The item was added: {item.model_dump_json()}"
+            total = ctx.userdata.order.total()
+            return (
+                f"The item was added: {item.model_dump_json()}\n"
+                f"ORDER_TOTAL_RS: {total:.0f} (exact total, computed by the system -- "
+                f"when stating the total, say this number as-is, never your own arithmetic)"
+            )
 
         return order_dish
 
@@ -118,7 +125,12 @@ class DriveThruAgent(Agent):
             raise ToolError(f"error: no item(s) found with order_id(s): {', '.join(not_found)}")
 
         removed_items = [await ctx.userdata.order.remove(oid) for oid in order_id]
-        return "Removed items:\n" + "\n".join(item.model_dump_json() for item in removed_items)
+        total = ctx.userdata.order.total()
+        return (
+            "Removed items:\n"
+            + "\n".join(item.model_dump_json() for item in removed_items)
+            + f"\nORDER_TOTAL_RS: {total:.0f} (exact total, computed by the system)"
+        )
 
     @function_tool
     async def list_order_items(self, ctx: RunContext[Userdata]) -> str:
@@ -138,7 +150,12 @@ class DriveThruAgent(Agent):
         if not items:
             return "The order is empty"
 
-        return "\n".join(item.model_dump_json() for item in items)
+        total = ctx.userdata.order.total()
+        return (
+            "\n".join(item.model_dump_json() for item in items)
+            + f"\nORDER_TOTAL_RS: {total:.0f} (exact total, computed by the system -- "
+            + "always state this exact number as the total)"
+        )
 
 
 def format_cart(userdata: Userdata) -> str:
@@ -175,7 +192,7 @@ async def on_session_end(ctx: JobContext) -> None:
     _ = json.dumps(report.to_dict(), indent=2)
 
 
-@server.rtc_session(on_session_end=on_session_end)
+@server.rtc_session(agent_name=os.getenv("AGENT_NAME", ""), on_session_end=on_session_end)
 async def drive_thru_agent(ctx: JobContext) -> None:
     userdata = await new_userdata()
     # Warm the menu index now, while the guest is still connecting, so their FIRST
@@ -190,6 +207,11 @@ async def drive_thru_agent(ctx: JobContext) -> None:
         llm=openai.realtime.RealtimeModel(voice="marin"),
         max_tool_steps=10,
     )
+
+    # Print per-turn metrics (response latency + audio-token usage) to the logs.
+    @session.on("metrics_collected")
+    def _on_metrics_collected(ev: MetricsCollectedEvent) -> None:
+        metrics.log_metrics(ev.metrics)
 
     background_audio = BackgroundAudioPlayer(
         ambient_sound=AudioConfig(
@@ -255,6 +277,30 @@ async def drive_thru_agent(ctx: JobContext) -> None:
 
     await session.start(agent=DriveThruAgent(userdata=userdata), room=ctx.room)
     await background_audio.start(room=ctx.room, agent_session=session)
+
+    # Greet first, like a real waiter, instead of waiting in silence.
+    await session.generate_reply(
+        instructions=(
+            "Greet the guest with one short, warm welcome as the restaurant's waiter "
+            "and invite them to ask about the menu or place an order. One brief sentence; "
+            "do not list menu items."
+        )
+    )
+
+    # --- Pause / Resume remote control (the web page's Pause button) ---------
+    # Pause stops the waiter mid-sentence and stops it listening. The session,
+    # the conversation memory and the cart all stay alive, so Resume picks up
+    # exactly where the guest left off.
+    @ctx.room.local_participant.register_rpc_method("set_paused")
+    async def _on_set_paused(data: rtc.RpcInvocationData) -> str:
+        pause = data.payload.strip().lower() in ("1", "true", "pause", "on")
+        if pause:
+            session.interrupt()
+            session.input.set_audio_enabled(False)
+        else:
+            session.input.set_audio_enabled(True)
+        logger.info("session %s by guest", "paused" if pause else "resumed")
+        return "paused" if pause else "resumed"
 
 
 if __name__ == "__main__":

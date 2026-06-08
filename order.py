@@ -56,3 +56,7 @@ class OrderState:
 
     def get(self, order_id: str) -> OrderedItem | None:
         return self.items[order_id]
+
+    def total(self) -> float:
+        """Exact order total in rupees, computed in code -- never by the LLM."""
+        return sum(item.price * item.quantity for item in self.items.values())
