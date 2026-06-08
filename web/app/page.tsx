@@ -1,15 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   BarVisualizer,
   LiveKitRoom,
   RoomAudioRenderer,
   useLocalParticipant,
   useRoomContext,
+  useTrackTranscription,
   useVoiceAssistant,
+  type TrackReferenceOrPlaceholder,
 } from "@livekit/components-react";
-import { ParticipantKind, type RpcInvocationData } from "livekit-client";
+import { ParticipantKind, Track, type RpcInvocationData } from "livekit-client";
 import { MENU, CURRENCY, type Dish } from "./menu";
 
 type ConnectionDetails = { serverUrl: string; token: string };
@@ -167,6 +169,7 @@ function Table() {
       <div className={`room ${menuOpen ? "room-split" : ""}`}>
         <section className="agent">
           <Pass />
+          <Transcript />
           <Bill rows={rows} hasOrder={hasOrder} onCheckout={() => setCheckoutOpen(true)} />
         </section>
         {menuOpen && <MenuPanel onClose={() => setMenuOpen(false)} />}
@@ -179,9 +182,8 @@ function Table() {
 }
 
 function Pass() {
-  const { state, audioTrack, agentTranscriptions } = useVoiceAssistant();
+  const { state, audioTrack } = useVoiceAssistant();
   const status = STATUS_LABEL[state ?? ""] ?? "Connecting";
-  const caption = agentTranscriptions?.at(-1)?.text ?? "";
 
   return (
     <section className={`pass pass-${state ?? "idle"}`}>
@@ -201,12 +203,75 @@ function Pass() {
           <span className="status-pip" aria-hidden />
           {status}
         </div>
-        <p className="vb-caption" aria-live="polite">
-          {caption || "Say hello, or ask for a recommendation."}
-        </p>
+        <p className="vb-sub">Your waiter is at the table</p>
       </div>
 
       <Controls />
+    </section>
+  );
+}
+
+// The live transcription, lifted out of the cramped voice bar into its own
+// readable panel: a two-voice conversation (you ↔ the waiter) that wraps
+// instead of truncating, and auto-scrolls to the newest line.
+type Line = { id: string; who: "you" | "waiter"; text: string; final: boolean };
+
+function Transcript() {
+  const { state, agentTranscriptions } = useVoiceAssistant();
+  const { localParticipant, microphoneTrack } = useLocalParticipant();
+
+  const micRef: TrackReferenceOrPlaceholder | undefined = microphoneTrack
+    ? { participant: localParticipant, source: Track.Source.Microphone, publication: microphoneTrack }
+    : undefined;
+  const { segments: userSegments } = useTrackTranscription(micRef);
+
+  const lines = useMemo<Line[]>(() => {
+    const waiter = (agentTranscriptions ?? []).map((s) => ({ ...s, who: "waiter" as const }));
+    const you = (userSegments ?? []).map((s) => ({ ...s, who: "you" as const }));
+    return [...waiter, ...you]
+      .sort((a, b) => (a.firstReceivedTime ?? 0) - (b.firstReceivedTime ?? 0))
+      .map((s) => ({ id: s.id, who: s.who, text: s.text, final: s.final }));
+  }, [agentTranscriptions, userSegments]);
+
+  const bodyRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+  }, [lines]);
+
+  const liveLabel =
+    state === "speaking" ? "Waiter speaking" :
+    state === "thinking" ? "Considering" :
+    state === "listening" ? "Listening" : "Live";
+
+  return (
+    <section className="transcript" aria-label="Conversation transcript">
+      <header className="transcript-head">
+        <span className="transcript-title">Conversation</span>
+        <span className={`transcript-live transcript-live-${state ?? "idle"}`}>
+          <span className="transcript-live-dot" aria-hidden />
+          {liveLabel}
+        </span>
+      </header>
+
+      <div className="transcript-body" ref={bodyRef} aria-live="polite">
+        {lines.length === 0 ? (
+          <p className="transcript-empty">
+            Say hello, or ask for a recommendation —
+            <span> your conversation with the waiter appears here.</span>
+          </p>
+        ) : (
+          lines.map((l, i) => (
+            <div
+              key={l.id}
+              className={`tline tline-${l.who} ${i === lines.length - 1 ? "tline-last" : ""} ${l.final ? "" : "tline-interim"}`}
+            >
+              <span className="tline-who">{l.who === "you" ? "You" : "Waiter"}</span>
+              <p className="tline-text">{l.text}</p>
+            </div>
+          ))
+        )}
+      </div>
     </section>
   );
 }
@@ -223,7 +288,7 @@ function Controls() {
   const togglePause = useCallback(async () => {
     if (!room || pausePending) return;
     const peers = Array.from(room.remoteParticipants.values());
-    const agent = peers.find((p) => p.kind === ParticipantKind.Agent) ?? peers[0];
+    const agent = peers.find((p) => p.kind === ParticipantKind.AGENT) ?? peers[0];
     if (!agent) return;
     const next = !paused;
     setPausePending(true);
