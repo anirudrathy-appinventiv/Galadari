@@ -196,9 +196,13 @@ async def on_session_end(ctx: JobContext) -> None:
 @server.rtc_session(agent_name=os.getenv("AGENT_NAME", ""), on_session_end=on_session_end)
 async def drive_thru_agent(ctx: JobContext) -> None:
     userdata = await new_userdata()
-    # Warm the menu index now, while the guest is still connecting, so their FIRST
-    # menu question doesn't pay the ~2s cold-start pause we measured in the logs.
-    await warm_menu_index()
+    # Warm the menu index in the BACKGROUND so it overlaps session start + the
+    # greeting instead of blocking them. Awaiting it here (the old behaviour) made
+    # the guest sit through the ~2s cold-start in silence BEFORE the greeting even
+    # began. As a background task it warms concurrently; the first query_menu still
+    # transparently waits on the same idempotent load if it hasn't finished, and the
+    # spoken filler + thinking-sound cover that case. Failures are already swallowed.
+    asyncio.create_task(warm_menu_index())
     session = AgentSession[Userdata](
         userdata=userdata,
         # Pure speech-to-speech: the Realtime model runs its OWN turn detection
@@ -213,6 +217,12 @@ async def drive_thru_agent(ctx: JobContext) -> None:
             input_audio_transcription=InputAudioTranscription(
                 model="gpt-4o-mini-transcribe",
                 language="en",
+                # Bias the transcript hard toward English: language="en" alone still
+                # let brief/unclear sounds render as stray non-Latin glyphs (e.g.
+                # Korean) in the guest bubble. The prompt nudges the STT to always
+                # write English in the Latin alphabet. The web UI also sanitises the
+                # guest transcript as a guaranteed backstop.
+                prompt="The guest is speaking English. Always transcribe in English using the Latin alphabet only.",
             ),
         ),
         max_tool_steps=10,

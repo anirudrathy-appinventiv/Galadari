@@ -216,6 +216,17 @@ function Pass() {
 // instead of truncating, and auto-scrolls to the newest line.
 type Line = { id: string; who: "you" | "waiter"; text: string; final: boolean };
 
+// The guest transcript must always read as English. The STT occasionally
+// mis-detects a brief or unclear sound as a stray non-Latin glyph (e.g. Korean)
+// even with the agent's language pinned to "en", so strip anything outside the
+// Latin alphabet / numbers / punctuation from the guest's lines as a guaranteed
+// backstop, and drop a line entirely if nothing English-readable is left.
+const toEnglish = (text: string): string =>
+  text
+    .replace(/[^\p{Script=Latin}\p{N}\p{P}\p{Z}\s]/gu, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+
 function Transcript() {
   const { state, agentTranscriptions } = useVoiceAssistant();
   const { localParticipant, microphoneTrack } = useLocalParticipant();
@@ -226,11 +237,25 @@ function Transcript() {
   const { segments: userSegments } = useTrackTranscription(micRef);
 
   const lines = useMemo<Line[]>(() => {
-    const waiter = (agentTranscriptions ?? []).map((s) => ({ ...s, who: "waiter" as const }));
-    const you = (userSegments ?? []).map((s) => ({ ...s, who: "you" as const }));
+    const waiter = (agentTranscriptions ?? []).map((s) => ({
+      id: s.id,
+      who: "waiter" as const,
+      text: s.text,
+      final: s.final,
+      firstReceivedTime: s.firstReceivedTime,
+    }));
+    const you = (userSegments ?? [])
+      .map((s) => ({
+        id: s.id,
+        who: "you" as const,
+        text: toEnglish(s.text),
+        final: s.final,
+        firstReceivedTime: s.firstReceivedTime,
+      }))
+      .filter((s) => s.text.length > 0);
     return [...waiter, ...you]
       .sort((a, b) => (a.firstReceivedTime ?? 0) - (b.firstReceivedTime ?? 0))
-      .map((s) => ({ id: s.id, who: s.who, text: s.text, final: s.final }));
+      .map(({ id, who, text, final }) => ({ id, who, text, final }));
   }, [agentTranscriptions, userSegments]);
 
   const bodyRef = useRef<HTMLDivElement>(null);
